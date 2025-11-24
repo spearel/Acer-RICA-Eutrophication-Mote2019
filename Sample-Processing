@@ -1,0 +1,108 @@
+#Samples were processed on the command line via bash scripts
+
+
+
+###Step 1: QC on unprocessed reads
+mkdir fastQC_raw/
+SGE_Batch -c 'fastqc *fastq.gz -o fastQC_raw/' -r log_fastQC_raw -M email@oregonstate.edu -q micro -m 32G -P 6
+
+# run samples through 'multiqc' to complie all fastQC files into an easier to read html
+SGE_Batch -c 'multiqc *_fastqc.zip' -r log_multiqc -M email@oregonstate.edu -q micro -m 32G -P 6
+
+
+
+###Step 2: Adapter trimming
+#note: if reads are 2x151 rather than 2x150 —> extra bp should be removed here with the “ftm=5” flag. This step occurs prior to adapter trimming
+SGE_Batch -c ‘bbduk.sh -Xmx1g in1=s013_R1.fastq.gz in2=s013_R2.fastq.gz out1=clean_s013_R1.fq out2=clean_s013_R2.fq ktrim=r k=23 mink=11 hdist=1 tpe tbo’ -r log_adapter_trim_1 -M email@oregonstate.edu -q micro -m 32G -P 6
+#Repeat for all samples
+    #Make an excutable loop to run through each sample
+my.bbduk.sh
+  #!/bin/bash
+  #for i in`cat ../sample_num`; do bbduk.sh in1=$i”_R1.fastq.gz” in2=$i”_R2.fastq.gz” out1=clean_$i”_R1.fq” out2=clean_$i”_R2.fq” ktrim=r k=23 mink=11 hdist=1 tpe tbo; done
+
+SGE_Batch -c 'my.bbduk.sh' -r log_mybbduk_clean1 -M email@oregonstate.edu -q micro -m 32G -P 6
+
+
+
+###Step 3: QC on trimmed (cleaned) reads
+#If adapters are removed completely, continue to fastQC. Else, repeat step2 on clean1 reads
+mkdir fastQC_cleaned1/
+
+SGE_Batch -c 'fastqc clean_s* -o fastQC_cleaned1/' -r log_fastQC_cleaned1 -M email@oregonstate.edu -q micro -m 32G -P 6
+
+#—> looks good, repeat for all samples
+SGE_Batch -c 'multiqc *_fastqc.zip' -r log_multiqc -M email@oregonstate.edu -q micro -m 32G -P 6
+
+
+
+###Step 4: Interleave paired-end reads.
+#in processing, we tested both paired-read merging and interleaving from this step onward. Aside from here this step, we will only show merged code moving forward.
+
+#Interleaving
+#test code for one sample
+SGE_Batch -c ‘reformat.sh in1=clean_s013_R1.fq in2=clean_s013_R2.fq out=s013_int.fq’ -r log_interleave_s013 -M [spearel@oregonstate.edu](mailto:spearel@oregonstate.edu) -q micro -m 32G -P 6
+#Make an excutable loop to run through each sample
+
+my.interleave.sh
+  #!/bin/bash
+  #for i in`cat ../sample_num`; do reformat.sh in1=clean_$i”_R1.fq” in2=clean_$i”_R2.fq out=$i”_int.fq”;done
+
+SGE_Batch -c 'my.interleave.sh' -r log_myinterleave -M email@oregonstate.edu -q micro -m 32G -P 6
+
+#Merging
+#test code for one sample:
+SGE_Batch -c ‘bbmerge.sh in1=clean_s013_R1.fq in2=clean_s013_R2.fq out=s013_merged.fq outu=s013_unmerged.fq ihist=s013_ihist.txt’ -r log_merge_s013 -M email@oregonstate.edu -q micro -m 32G -P 6
+
+#Make an excutable loop to run through each sample
+my.bbmerge.sh
+  #!/bin/bash
+  #for i in`cat ../sample_num`; do bbmerge.sh in1=clean_$i”_R1.fq” in2=clean_$i”_R2.fq out=$i”_merged.fq” outu=$i”_unmerged.fq” ihist=$i”_ihist.txt”;done
+
+SGE_Batch -c 'my.bbmerge.sh' -r log_mybbmerge -M email@oregonstate.edu -q micro -m 32G -P 6
+
+
+
+###Step 5: Map to genome
+#location of reference genome indices
+#A.rohweri: /databases/microbial.genomes/bowtie2_db_A.rohweri/Aroh
+#S.fitti: /databases/symbiodinaceae.genomes/bowtie2_db_S.fitti/S.fitti
+#A.cervicornis: /databases/host.genomes/bowtie2_db_A.cer/A.cer
+
+SGE_Batch -c 'bowtie2 -x /databases/microbial.genomes/bowtie2_db_A.rohweri/A.roh -U s013_merged.fq -q -S s013_merged_Aroh.sam -p 8' -r log_bowtie2_s013_merged_Aroh -M email@oregonstate.edu -q micro -m 32G -P 6
+
+#Make sure to adjust my.bowtie2.sh for each genome you are mapping to
+my.bowtie2.sh
+  #!/bin/bash
+  #for i in`cat sample_num`; do bowtie2 -x /databases/microbial.genomes/bowtie2_db_A.rohweri/A.roh -U $i”_merged.fq” -q -S $i”_merged_Aroh.sam” -p 8; done
+
+SGE_Batch -c 'my.bowtie2.sh' -r log_mybowtie2_Aroh -M email@oregonstate.edu -q micro -m 32G -P 6
+
+#Convert sam to bam file for downstream processing
+my.convert_sam_to_bam.sh
+  #!/bin/bash
+  #for i in `cat sample_num`; do samtools view -bS $i”_merged_Aroh.sam” > $i”_merged_Aroh.bam”; done
+
+SGE_Batch -c 'my.convert_sam_to_bam.sh' -r log_convert_to_bam -q micro -m 32G -P 6
+
+
+
+#Step 6. Count Mapped Reads
+#location of gff files:
+#A. rohweri: /databases/microbial.genomes/c
+#S. fitti: /databases/symbiodinaceae.genomes/Sfitti_EVM.all.gff3
+#A.cervicornis:/databases/host.genomes/Acer_v2_Oct_2023/Acerv_assembly_v1.0.gff3
+
+#test code for one sample
+SGE_Batch -c 'htseq-count -s yes -a 10 -t gene -i ID -m intersection-nonempty --nonunique none --secondary-alignments ignore --supplementary-alignments ignore s013_Aroh.sam /databases/microbial.genomes/Aquarickettsia_rohweri_genomic.gff.gz > s013_Aroh_feature_count_refseq_gff_test’ -r log_htseq-count_s013_Aroh_test -M email@oregonstate.edu -q micro -m 32G -P 6
+
+SGE_Batch -c 'htseq-count -s yes -a 10 -t gene -i ID -m intersection-nonempty --nonunique none --secondary-alignments ignore --supplementary-alignments ignore s001_int_Sfit_indep.sam /databases/symbiodinaceae.genomes/Sfitti_EVM.all.gff3 > s001_Sfit_feature_count_refseq_gff_test’ -r log_htseq-count_s001_Sfit_test -M email@oregonstate.edu -q micro -m 32G -P 6
+
+my.htseqcount.sh
+  #!/bin/bash
+  #for i in`cat sample_num`; do htseq-count -s yes -a 10 -t gene -i ID -m intersection-nonempty --nonunique none --secondary-alignments ignore --supplementary-alignments ignore $i”_Aroh.sam” /databases/microbial.genomes/Aquarickettsia_rohweri_genomic.gff.gz > $i”_Aroh_feature_count_refseq_gff”; done
+
+SGE_Batch -c 'my.htseqcount.sh' -r log_htseqcount -M email@oregonstate.edu -q micro -m 32G -P 6
+
+
+
+###Step7. Perform transcriptome analysis on local device (R)
